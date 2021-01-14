@@ -116,12 +116,12 @@ func TestTimeoutIsSetCorrectly(t *testing.T) {
 		{20 * time.Second, "15", 0, 15},
 		{5 * time.Second, "15", 0, 5},
 		{5 * time.Second, "15", 0.5, 5},
-		{10 * time.Second, "", 0.5, 9.5},
+		{10 * time.Second, "", 0.5, 10},
 		{10 * time.Second, "10", 0.5, 9.5},
 		{9500 * time.Millisecond, "", 0.5, 9.5},
-		{9500 * time.Millisecond, "", 1, 9},
-		{0 * time.Second, "", 0.5, 9.5},
-		{0 * time.Second, "", 0, 10},
+		{9500 * time.Millisecond, "", 1, 9.5},
+		{0 * time.Second, "", 0.5, 119.5},
+		{0 * time.Second, "", 0, 120},
 	}
 
 	for _, v := range tests {
@@ -134,6 +134,59 @@ func TestTimeoutIsSetCorrectly(t *testing.T) {
 		timeout, _ := getTimeout(request, module, v.inOffset)
 		if timeout != v.outTimeout {
 			t.Errorf("timeout is incorrect: %v, want %v", timeout, v.outTimeout)
+		}
+	}
+}
+
+func TestComputeExternalURL(t *testing.T) {
+	tests := []struct {
+		input string
+		valid bool
+	}{
+		{
+			input: "",
+			valid: true,
+		},
+		{
+			input: "http://proxy.com/prometheus",
+			valid: true,
+		},
+		{
+			input: "'https://url/prometheus'",
+			valid: false,
+		},
+		{
+			input: "'relative/path/with/quotes'",
+			valid: false,
+		},
+		{
+			input: "http://alertmanager.company.com",
+			valid: true,
+		},
+		{
+			input: "https://double--dash.de",
+			valid: true,
+		},
+		{
+			input: "'http://starts/with/quote",
+			valid: false,
+		},
+		{
+			input: "ends/with/quote\"",
+			valid: false,
+		},
+	}
+
+	for _, test := range tests {
+		_, err := computeExternalURL(test.input, "0.0.0.0:9090")
+		if test.valid {
+			if err != nil {
+				t.Errorf("unexpected error %v", err)
+			}
+		} else {
+			if err == nil {
+				t.Errorf("expected error computing %s got none", test.input)
+			}
 		}
 	}
 }

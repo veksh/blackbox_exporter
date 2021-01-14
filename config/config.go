@@ -17,12 +17,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"runtime"
 	"sync"
 	"time"
 
 	yaml "gopkg.in/yaml.v3"
 
+	"github.com/miekg/dns"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/config"
 )
@@ -113,6 +115,53 @@ func (sc *SafeConfig) ReloadConfig(confFile string) (err error) {
 	return nil
 }
 
+// Regexp encapsulates a regexp.Regexp and makes it YAML marshalable.
+type Regexp struct {
+	*regexp.Regexp
+	original string
+}
+
+// NewRegexp creates a new anchored Regexp and returns an error if the
+// passed-in regular expression does not compile.
+func NewRegexp(s string) (Regexp, error) {
+	regex, err := regexp.Compile(s)
+	return Regexp{
+		Regexp:   regex,
+		original: s,
+	}, err
+}
+
+// UnmarshalYAML implements the yaml.Unmarshaler interface.
+func (re *Regexp) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var s string
+	if err := unmarshal(&s); err != nil {
+		return err
+	}
+	r, err := NewRegexp(s)
+	if err != nil {
+		return fmt.Errorf("\"Could not compile regular expression\" regexp=\"%s\"", s)
+	}
+	*re = r
+	return nil
+}
+
+// MarshalYAML implements the yaml.Marshaler interface.
+func (re Regexp) MarshalYAML() (interface{}, error) {
+	if re.original != "" {
+		return re.original, nil
+	}
+	return nil, nil
+}
+
+// MustNewRegexp works like NewRegexp, but panics if the regular expression does not compile.
+func MustNewRegexp(s string) Regexp {
+	re, err := NewRegexp(s)
+	if err != nil {
+		panic(err)
+	}
+	return re
+}
+
 type Module struct {
 	Prober  string        `yaml:"prober,omitempty"`
 	Timeout time.Duration `yaml:"timeout,omitempty"`
@@ -133,8 +182,8 @@ type HTTPProbe struct {
 	FailIfNotSSL                 bool                    `yaml:"fail_if_not_ssl,omitempty"`
 	Method                       string                  `yaml:"method,omitempty"`
 	Headers                      map[string]string       `yaml:"headers,omitempty"`
-	FailIfBodyMatchesRegexp      []string                `yaml:"fail_if_body_matches_regexp,omitempty"`
-	FailIfBodyNotMatchesRegexp   []string                `yaml:"fail_if_body_not_matches_regexp,omitempty"`
+	FailIfBodyMatchesRegexp      []Regexp                `yaml:"fail_if_body_matches_regexp,omitempty"`
+	FailIfBodyNotMatchesRegexp   []Regexp                `yaml:"fail_if_body_not_matches_regexp,omitempty"`
 	FailIfHeaderMatchesRegexp    []HeaderMatch           `yaml:"fail_if_header_matches,omitempty"`
 	FailIfHeaderNotMatchesRegexp []HeaderMatch           `yaml:"fail_if_header_not_matches,omitempty"`
 	Body                         string                  `yaml:"body,omitempty"`
@@ -143,12 +192,12 @@ type HTTPProbe struct {
 
 type HeaderMatch struct {
 	Header       string `yaml:"header,omitempty"`
-	Regexp       string `yaml:"regexp,omitempty"`
+	Regexp       Regexp `yaml:"regexp,omitempty"`
 	AllowMissing bool   `yaml:"allow_missing,omitempty"`
 }
 
 type QueryResponse struct {
-	Expect   string `yaml:"expect,omitempty"`
+	Expect   Regexp `yaml:"expect,omitempty"`
 	Send     string `yaml:"send,omitempty"`
 	StartTLS bool   `yaml:"starttls,omitempty"`
 }
@@ -171,21 +220,26 @@ type ICMPProbe struct {
 }
 
 type DNSProbe struct {
-	IPProtocol         string         `yaml:"preferred_ip_protocol,omitempty"`
-	IPProtocolFallback bool           `yaml:"ip_protocol_fallback,omitempty"`
-	SourceIPAddress    string         `yaml:"source_ip_address,omitempty"`
-	TransportProtocol  string         `yaml:"transport_protocol,omitempty"`
-	QueryName          string         `yaml:"query_name,omitempty"`
-	QueryType          string         `yaml:"query_type,omitempty"`   // Defaults to ANY.
-	ValidRcodes        []string       `yaml:"valid_rcodes,omitempty"` // Defaults to NOERROR.
-	ValidateAnswer     DNSRRValidator `yaml:"validate_answer_rrs,omitempty"`
-	ValidateAuthority  DNSRRValidator `yaml:"validate_authority_rrs,omitempty"`
-	ValidateAdditional DNSRRValidator `yaml:"validate_additional_rrs,omitempty"`
+	IPProtocol         string           `yaml:"preferred_ip_protocol,omitempty"`
+	IPProtocolFallback bool             `yaml:"ip_protocol_fallback,omitempty"`
+	DNSOverTLS         bool             `yaml:"dns_over_tls,omitempty"`
+	TLSConfig          config.TLSConfig `yaml:"tls_config,omitempty"`
+	SourceIPAddress    string           `yaml:"source_ip_address,omitempty"`
+	TransportProtocol  string           `yaml:"transport_protocol,omitempty"`
+	QueryClass         string           `yaml:"query_class,omitempty"` // Defaults to IN.
+	QueryName          string           `yaml:"query_name,omitempty"`
+	QueryType          string           `yaml:"query_type,omitempty"`   // Defaults to ANY.
+	ValidRcodes        []string         `yaml:"valid_rcodes,omitempty"` // Defaults to NOERROR.
+	ValidateAnswer     DNSRRValidator   `yaml:"validate_answer_rrs,omitempty"`
+	ValidateAuthority  DNSRRValidator   `yaml:"validate_authority_rrs,omitempty"`
+	ValidateAdditional DNSRRValidator   `yaml:"validate_additional_rrs,omitempty"`
 }
 
 type DNSRRValidator struct {
-	FailIfMatchesRegexp    []string `yaml:"fail_if_matches_regexp,omitempty"`
-	FailIfNotMatchesRegexp []string `yaml:"fail_if_not_matches_regexp,omitempty"`
+	FailIfMatchesRegexp     []string `yaml:"fail_if_matches_regexp,omitempty"`
+	FailIfAllMatchRegexp    []string `yaml:"fail_if_all_match_regexp,omitempty"`
+	FailIfNotMatchesRegexp  []string `yaml:"fail_if_not_matches_regexp,omitempty"`
+	FailIfNoneMatchesRegexp []string `yaml:"fail_if_none_matches_regexp,omitempty"`
 }
 
 // UnmarshalYAML implements the yaml.Unmarshaler interface.
@@ -230,6 +284,17 @@ func (s *DNSProbe) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	if s.QueryName == "" {
 		return errors.New("query name must be set for DNS module")
 	}
+	if s.QueryClass != "" {
+		if _, ok := dns.StringToClass[s.QueryClass]; !ok {
+			return fmt.Errorf("query class '%s' is not valid", s.QueryClass)
+		}
+	}
+	if s.QueryType != "" {
+		if _, ok := dns.StringToType[s.QueryType]; !ok {
+			return fmt.Errorf("query type '%s' is not valid", s.QueryType)
+		}
+	}
+
 	return nil
 }
 
@@ -272,6 +337,7 @@ func (s *QueryResponse) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	if err := unmarshal((*plain)(s)); err != nil {
 		return err
 	}
+
 	return nil
 }
 
@@ -286,7 +352,7 @@ func (s *HeaderMatch) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		return errors.New("header name must be set for HTTP header matchers")
 	}
 
-	if s.Regexp == "" {
+	if s.Regexp.Regexp == nil || s.Regexp.Regexp.String() == "" {
 		return errors.New("regexp must be set for HTTP header matchers")
 	}
 

@@ -19,7 +19,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
-	"regexp"
 
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
@@ -94,6 +93,24 @@ func ProbeTCP(ctx context.Context, target string, module config.Module, registry
 		Name: "probe_ssl_earliest_cert_expiry",
 		Help: "Returns earliest SSL cert expiry date",
 	})
+	probeSSLLastChainExpiryTimestampSeconds := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "probe_ssl_last_chain_expiry_timestamp_seconds",
+		Help: "Returns last SSL chain expiry in unixtime",
+	})
+	probeSSLLastInformation := prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "probe_ssl_last_chain_info",
+			Help: "Contains SSL leaf certificate information",
+		},
+		[]string{"fingerprint_sha256"},
+	)
+	probeTLSVersion := prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "probe_tls_version_info",
+			Help: "Returns the TLS version used, or NaN when unknown",
+		},
+		[]string{"version"},
+	)
 	probeFailedDueToRegex := prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "probe_failed_due_to_regex",
 		Help: "Indicates if probe failed due to regex",
@@ -118,26 +135,24 @@ func ProbeTCP(ctx context.Context, target string, module config.Module, registry
 	}
 	if module.TCP.TLS {
 		state := conn.(*tls.Conn).ConnectionState()
-		registry.MustRegister(probeSSLEarliestCertExpiry)
+		registry.MustRegister(probeSSLEarliestCertExpiry, probeTLSVersion, probeSSLLastChainExpiryTimestampSeconds, probeSSLLastInformation)
 		probeSSLEarliestCertExpiry.Set(float64(getEarliestCertExpiry(&state).Unix()))
+		probeTLSVersion.WithLabelValues(getTLSVersion(&state)).Set(1)
+		probeSSLLastChainExpiryTimestampSeconds.Set(float64(getLastChainExpiry(&state).Unix()))
+		probeSSLLastInformation.WithLabelValues(getFingerprint(&state)).Set(1)
 	}
 	scanner := bufio.NewScanner(conn)
 	for i, qr := range module.TCP.QueryResponse {
 		level.Info(logger).Log("msg", "Processing query response entry", "entry_number", i)
 		send := qr.Send
-		if qr.Expect != "" {
-			re, err := regexp.Compile(qr.Expect)
-			if err != nil {
-				level.Error(logger).Log("msg", "Could not compile into regular expression", "regexp", qr.Expect, "err", err)
-				return false
-			}
+		if qr.Expect.Regexp != nil {
 			var match []int
 			// Read lines until one of them matches the configured regexp.
 			for scanner.Scan() {
 				level.Debug(logger).Log("msg", "Read line", "line", scanner.Text())
-				match = re.FindSubmatchIndex(scanner.Bytes())
+				match = qr.Expect.Regexp.FindSubmatchIndex(scanner.Bytes())
 				if match != nil {
-					level.Info(logger).Log("msg", "Regexp matched", "regexp", re, "line", scanner.Text())
+					level.Info(logger).Log("msg", "Regexp matched", "regexp", qr.Expect.Regexp, "line", scanner.Text())
 					break
 				}
 			}
@@ -147,11 +162,11 @@ func ProbeTCP(ctx context.Context, target string, module config.Module, registry
 			}
 			if match == nil {
 				probeFailedDueToRegex.Set(1)
-				level.Error(logger).Log("msg", "Regexp did not match", "regexp", re, "line", scanner.Text())
+				level.Error(logger).Log("msg", "Regexp did not match", "regexp", qr.Expect.Regexp, "line", scanner.Text())
 				return false
 			}
 			probeFailedDueToRegex.Set(0)
-			send = string(re.Expand(nil, []byte(send), scanner.Bytes(), match))
+			send = string(qr.Expect.Regexp.Expand(nil, []byte(send), scanner.Bytes(), match))
 		}
 		if send != "" {
 			level.Debug(logger).Log("msg", "Sending line", "line", send)
@@ -186,8 +201,11 @@ func ProbeTCP(ctx context.Context, target string, module config.Module, registry
 
 			// Get certificate expiry.
 			state := tlsConn.ConnectionState()
-			registry.MustRegister(probeSSLEarliestCertExpiry)
+			registry.MustRegister(probeSSLEarliestCertExpiry, probeSSLLastChainExpiryTimestampSeconds)
 			probeSSLEarliestCertExpiry.Set(float64(getEarliestCertExpiry(&state).Unix()))
+			probeTLSVersion.WithLabelValues(getTLSVersion(&state)).Set(1)
+			probeSSLLastChainExpiryTimestampSeconds.Set(float64(getLastChainExpiry(&state).Unix()))
+			probeSSLLastInformation.WithLabelValues(getFingerprint(&state)).Set(1)
 		}
 	}
 	return true

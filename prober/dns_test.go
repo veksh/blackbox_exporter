@@ -86,8 +86,8 @@ func recursiveDNSHandler(w dns.ResponseWriter, r *dns.Msg) {
 }
 
 func TestRecursiveDNSResponse(t *testing.T) {
-	if os.Getenv("TRAVIS") == "true" {
-		t.Skip("skipping; travisci is failing on ipv6 dns requests")
+	if os.Getenv("CI") == "true" {
+		t.Skip("skipping; CI is failing on ipv6 dns requests")
 	}
 
 	tests := []struct {
@@ -96,21 +96,24 @@ func TestRecursiveDNSResponse(t *testing.T) {
 	}{
 		{
 			config.DNSProbe{
-				IPProtocol: "ipv4",
-				QueryName:  "example.com",
+				IPProtocol:         "ip4",
+				IPProtocolFallback: true,
+				QueryName:          "example.com",
 			}, true,
 		},
 		{
 			config.DNSProbe{
-				IPProtocol:  "ipv4",
-				QueryName:   "example.com",
-				ValidRcodes: []string{"SERVFAIL", "NXDOMAIN"},
+				IPProtocol:         "ip4",
+				IPProtocolFallback: true,
+				QueryName:          "example.com",
+				ValidRcodes:        []string{"SERVFAIL", "NXDOMAIN"},
 			}, false,
 		},
 		{
 			config.DNSProbe{
-				IPProtocol: "ipv4",
-				QueryName:  "example.com",
+				IPProtocol:         "ip4",
+				IPProtocolFallback: true,
+				QueryName:          "example.com",
 				ValidateAnswer: config.DNSRRValidator{
 					FailIfMatchesRegexp:    []string{".*7200.*"},
 					FailIfNotMatchesRegexp: []string{".*3600.*"},
@@ -119,8 +122,9 @@ func TestRecursiveDNSResponse(t *testing.T) {
 		},
 		{
 			config.DNSProbe{
-				IPProtocol: "ipv4",
-				QueryName:  "example.com",
+				IPProtocol:         "ip4",
+				IPProtocolFallback: true,
+				QueryName:          "example.com",
 				ValidateAuthority: config.DNSRRValidator{
 					FailIfMatchesRegexp: []string{".*7200.*"},
 				},
@@ -128,8 +132,9 @@ func TestRecursiveDNSResponse(t *testing.T) {
 		},
 		{
 			config.DNSProbe{
-				IPProtocol: "ipv4",
-				QueryName:  "example.com",
+				IPProtocol:         "ip4",
+				IPProtocolFallback: true,
+				QueryName:          "example.com",
 				ValidateAdditional: config.DNSRRValidator{
 					FailIfNotMatchesRegexp: []string{".*3600.*"},
 				},
@@ -176,7 +181,12 @@ func authoritativeDNSHandler(w dns.ResponseWriter, r *dns.Msg) {
 			panic(err)
 		}
 		m.Answer = append(m.Answer, a)
-
+	} else if r.Question[0].Qclass == dns.ClassCHAOS && r.Question[0].Qtype == dns.TypeTXT {
+		txt, err := dns.NewRR("example.com. 3600 CH TXT \"goCHAOS\"")
+		if err != nil {
+			panic(err)
+		}
+		m.Answer = append(m.Answer, txt)
 	} else {
 		a, err := dns.NewRR("example.com. 3600 IN A 127.0.0.1")
 		if err != nil {
@@ -216,8 +226,8 @@ func authoritativeDNSHandler(w dns.ResponseWriter, r *dns.Msg) {
 }
 
 func TestAuthoritativeDNSResponse(t *testing.T) {
-	if os.Getenv("TRAVIS") == "true" {
-		t.Skip("skipping; travisci is failing on ipv6 dns requests")
+	if os.Getenv("CI") == "true" {
+		t.Skip("skipping; CI is failing on ipv6 dns requests")
 	}
 
 	tests := []struct {
@@ -226,27 +236,45 @@ func TestAuthoritativeDNSResponse(t *testing.T) {
 	}{
 		{
 			config.DNSProbe{
-				IPProtocol: "ipv4",
-				QueryName:  "example.com",
+				IPProtocol:         "ip4",
+				IPProtocolFallback: true,
+				QueryName:          "example.com",
 			}, true,
 		},
 		{
 			config.DNSProbe{
-				IPProtocol: "ipv4",
-				QueryName:  "example.com",
-				QueryType:  "SOA",
+				IPProtocol:         "ip4",
+				IPProtocolFallback: true,
+				QueryName:          "example.com",
+				QueryType:          "SOA",
 			}, true,
-		}, {
+		},
+		{
 			config.DNSProbe{
-				IPProtocol:  "ipv4",
-				QueryName:   "example.com",
-				ValidRcodes: []string{"SERVFAIL", "NXDOMAIN"},
+				IPProtocol:         "ip4",
+				IPProtocolFallback: true,
+				QueryClass:         "CH",
+				QueryName:          "example.com",
+				QueryType:          "TXT",
+				ValidateAnswer: config.DNSRRValidator{
+					FailIfMatchesRegexp:    []string{".*IN.*"},
+					FailIfNotMatchesRegexp: []string{".*CH.*"},
+				},
+			}, true,
+		},
+		{
+			config.DNSProbe{
+				IPProtocol:         "ip4",
+				IPProtocolFallback: true,
+				QueryName:          "example.com",
+				ValidRcodes:        []string{"SERVFAIL", "NXDOMAIN"},
 			}, false,
 		},
 		{
 			config.DNSProbe{
-				IPProtocol: "ipv4",
-				QueryName:  "example.com",
+				IPProtocol:         "ip4",
+				IPProtocolFallback: true,
+				QueryName:          "example.com",
 				ValidateAnswer: config.DNSRRValidator{
 					FailIfMatchesRegexp:    []string{".*3600.*"},
 					FailIfNotMatchesRegexp: []string{".*3600.*"},
@@ -255,8 +283,9 @@ func TestAuthoritativeDNSResponse(t *testing.T) {
 		},
 		{
 			config.DNSProbe{
-				IPProtocol: "ipv4",
-				QueryName:  "example.com",
+				IPProtocol:         "ip4",
+				IPProtocolFallback: true,
+				QueryName:          "example.com",
 				ValidateAnswer: config.DNSRRValidator{
 					FailIfMatchesRegexp:    []string{".*7200.*"},
 					FailIfNotMatchesRegexp: []string{".*7200.*"},
@@ -265,8 +294,9 @@ func TestAuthoritativeDNSResponse(t *testing.T) {
 		},
 		{
 			config.DNSProbe{
-				IPProtocol: "ipv4",
-				QueryName:  "example.com",
+				IPProtocol:         "ip4",
+				IPProtocolFallback: true,
+				QueryName:          "example.com",
 				ValidateAuthority: config.DNSRRValidator{
 					FailIfNotMatchesRegexp: []string{"ns.*.isp.net"},
 				},
@@ -274,8 +304,9 @@ func TestAuthoritativeDNSResponse(t *testing.T) {
 		},
 		{
 			config.DNSProbe{
-				IPProtocol: "ipv4",
-				QueryName:  "example.com",
+				IPProtocol:         "ip4",
+				IPProtocolFallback: true,
+				QueryName:          "example.com",
 				ValidateAdditional: config.DNSRRValidator{
 					FailIfNotMatchesRegexp: []string{"^ns.*.isp"},
 				},
@@ -283,10 +314,31 @@ func TestAuthoritativeDNSResponse(t *testing.T) {
 		},
 		{
 			config.DNSProbe{
-				IPProtocol: "ipv4",
-				QueryName:  "example.com",
+				IPProtocol:         "ip4",
+				IPProtocolFallback: true,
+				QueryName:          "example.com",
 				ValidateAdditional: config.DNSRRValidator{
 					FailIfMatchesRegexp: []string{"^ns.*.isp"},
+				},
+			}, false,
+		},
+		{
+			config.DNSProbe{
+				IPProtocol:         "ip4",
+				IPProtocolFallback: true,
+				QueryName:          "example.com",
+				ValidateAdditional: config.DNSRRValidator{
+					FailIfAllMatchRegexp: []string{".*127.0.0.*"},
+				},
+			}, false,
+		},
+		{
+			config.DNSProbe{
+				IPProtocol:         "ip4",
+				IPProtocolFallback: true,
+				QueryName:          "example.com",
+				ValidateAdditional: config.DNSRRValidator{
+					FailIfNoneMatchesRegexp: []string{".*127.0.0.3.*"},
 				},
 			}, false,
 		},
@@ -324,8 +376,8 @@ func TestAuthoritativeDNSResponse(t *testing.T) {
 }
 
 func TestServfailDNSResponse(t *testing.T) {
-	if os.Getenv("TRAVIS") == "true" {
-		t.Skip("skipping; travisci is failing on ipv6 dns requests")
+	if os.Getenv("CI") == "true" {
+		t.Skip("skipping; CI is failing on ipv6 dns requests")
 	}
 
 	tests := []struct {
@@ -334,29 +386,33 @@ func TestServfailDNSResponse(t *testing.T) {
 	}{
 		{
 			config.DNSProbe{
-				IPProtocol: "ipv4",
-				QueryName:  "example.com",
+				IPProtocol:         "ip4",
+				IPProtocolFallback: true,
+				QueryName:          "example.com",
 			}, false,
 		},
 		{
 			config.DNSProbe{
-				IPProtocol:  "ipv4",
-				QueryName:   "example.com",
-				ValidRcodes: []string{"SERVFAIL", "NXDOMAIN"},
+				IPProtocol:         "ip4",
+				IPProtocolFallback: true,
+				QueryName:          "example.com",
+				ValidRcodes:        []string{"SERVFAIL", "NXDOMAIN"},
 			}, true,
 		},
 		{
 			config.DNSProbe{
-				IPProtocol: "ipv4",
-				QueryName:  "example.com",
-				QueryType:  "NOT_A_VALID_QUERY_TYPE",
+				IPProtocol:         "ip4",
+				IPProtocolFallback: true,
+				QueryName:          "example.com",
+				QueryType:          "NOT_A_VALID_QUERY_TYPE",
 			}, false,
 		},
 		{
 			config.DNSProbe{
-				IPProtocol:  "ipv4",
-				QueryName:   "example.com",
-				ValidRcodes: []string{"NOT_A_VALID_RCODE"},
+				IPProtocol:         "ip4",
+				IPProtocolFallback: true,
+				QueryName:          "example.com",
+				ValidRcodes:        []string{"NOT_A_VALID_RCODE"},
 			}, false,
 		},
 	}
@@ -390,6 +446,10 @@ func TestServfailDNSResponse(t *testing.T) {
 }
 
 func TestDNSProtocol(t *testing.T) {
+	if os.Getenv("CI") == "true" {
+		t.Skip("skipping; CI is failing on ipv6 dns requests")
+	}
+
 	// This test assumes that listening TCP listens both IPv6 and IPv4 traffic and
 	// localhost resolves to both 127.0.0.1 and ::1. we must skip the test if either
 	// of these isn't true. This should be true for modern Linux systems.
@@ -407,13 +467,13 @@ func TestDNSProtocol(t *testing.T) {
 
 		_, port, _ := net.SplitHostPort(addr.String())
 
-		// Force IPv4
+		// Prefer IPv6
 		module := config.Module{
 			Timeout: time.Second,
 			DNS: config.DNSProbe{
 				QueryName:         "example.com",
 				TransportProtocol: protocol,
-				IPProtocol:        "ip4",
+				IPProtocol:        "ip6",
 			},
 		}
 		registry := prometheus.NewRegistry()
@@ -421,64 +481,13 @@ func TestDNSProtocol(t *testing.T) {
 		defer cancel()
 		result := ProbeDNS(testCTX, net.JoinHostPort("localhost", port), module, registry, log.NewNopLogger())
 		if !result {
-			t.Fatalf("DNS protocol: \"%v4\" connection test failed, expected success.", protocol)
+			t.Fatalf("DNS protocol: \"%v\", preferred \"ip6\" connection test failed, expected success.", protocol)
 		}
 		mfs, err := registry.Gather()
 		if err != nil {
 			t.Fatal(err)
 		}
-
 		expectedResults := map[string]float64{
-			"probe_ip_protocol": 4,
-		}
-		checkRegistryResults(expectedResults, mfs, t)
-
-		// Force IPv6
-		module = config.Module{
-			Timeout: time.Second,
-			DNS: config.DNSProbe{
-				QueryName:         "example.com",
-				TransportProtocol: protocol,
-				IPProtocol:        "ip6",
-			},
-		}
-		registry = prometheus.NewRegistry()
-		testCTX, cancel = context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		result = ProbeDNS(testCTX, net.JoinHostPort("localhost", port), module, registry, log.NewNopLogger())
-		if !result {
-			t.Fatalf("DNS protocol: \"%v6\" connection test failed, expected success.", protocol)
-		}
-		mfs, err = registry.Gather()
-		if err != nil {
-			t.Fatal(err)
-		}
-		expectedResults = map[string]float64{
-			"probe_ip_protocol": 6,
-		}
-		checkRegistryResults(expectedResults, mfs, t)
-
-		// Prefer IPv6
-		module = config.Module{
-			Timeout: time.Second,
-			DNS: config.DNSProbe{
-				QueryName:         "example.com",
-				TransportProtocol: protocol,
-				IPProtocol:        "ip6",
-			},
-		}
-		registry = prometheus.NewRegistry()
-		testCTX, cancel = context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		result = ProbeDNS(testCTX, net.JoinHostPort("localhost", port), module, registry, log.NewNopLogger())
-		if !result {
-			t.Fatalf("DNS protocol: \"%v\", preferred \"ip6\" connection test failed, expected success.", protocol)
-		}
-		mfs, err = registry.Gather()
-		if err != nil {
-			t.Fatal(err)
-		}
-		expectedResults = map[string]float64{
 			"probe_ip_protocol": 6,
 		}
 		checkRegistryResults(expectedResults, mfs, t)
@@ -564,4 +573,50 @@ func TestDNSProtocol(t *testing.T) {
 		checkRegistryResults(expectedResults, mfs, t)
 
 	}
+}
+
+// TestDNSMetrics checks that calling ProbeDNS populates the expected
+// set of metrics for a DNS probe, but it does not test that those
+// metrics contain specific values.
+func TestDNSMetrics(t *testing.T) {
+	server, addr := startDNSServer("udp", recursiveDNSHandler)
+	defer server.Shutdown()
+
+	_, port, _ := net.SplitHostPort(addr.String())
+
+	module := config.Module{
+		Timeout: time.Second,
+		DNS: config.DNSProbe{
+			IPProtocol:         "ip4",
+			IPProtocolFallback: true,
+			QueryName:          "example.com",
+		},
+	}
+	registry := prometheus.NewRegistry()
+	testCTX, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result := ProbeDNS(testCTX, net.JoinHostPort("localhost", port), module, registry, log.NewNopLogger())
+	if !result {
+		t.Fatalf("DNS test connection failed, expected success.")
+	}
+	mfs, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expectedMetrics := map[string]map[string]map[string]struct{}{
+		"probe_dns_lookup_time_seconds": nil,
+		"probe_dns_duration_seconds": {
+			"phase": {
+				"resolve": {},
+				"connect": {},
+				"request": {},
+			},
+		},
+		"probe_dns_answer_rrs":     nil,
+		"probe_dns_authority_rrs":  nil,
+		"probe_dns_additional_rrs": nil,
+	}
+
+	checkMetrics(expectedMetrics, mfs, t)
 }

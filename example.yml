@@ -3,7 +3,7 @@ modules:
     prober: http
     timeout: 5s
     http:
-      valid_http_versions: ["HTTP/1.1", "HTTP/2"]
+      valid_http_versions: ["HTTP/1.1", "HTTP/2.0"]
       valid_status_codes: []  # Defaults to 2xx
       method: GET
       headers:
@@ -77,14 +77,14 @@ modules:
     tcp:
       query_response:
         - expect: "^220 ([^ ]+) ESMTP (.+)$"
-        - send: "EHLO prober"
+        - send: "EHLO prober\r"
         - expect: "^250-STARTTLS"
-        - send: "STARTTLS"
+        - send: "STARTTLS\r"
         - expect: "^220"
         - starttls: true
-        - send: "EHLO prober"
+        - send: "EHLO prober\r"
         - expect: "^250-AUTH"
-        - send: "QUIT"
+        - send: "QUIT\r"
   irc_banner_example:
     prober: tcp
     timeout: 5s
@@ -112,8 +112,12 @@ modules:
       validate_answer_rrs:
         fail_if_matches_regexp:
         - ".*127.0.0.1"
+        fail_if_all_match_regexp:
+        - ".*127.0.0.1"
         fail_if_not_matches_regexp:
         - "www.prometheus.io.\t300\tIN\tA\t127.0.0.1"
+        fail_if_none_matches_regexp:
+        - "127.0.0.1"
       validate_authority_rrs:
         fail_if_matches_regexp:
         - ".*127.0.0.1"

@@ -14,8 +14,13 @@
 package prober
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -68,8 +73,8 @@ func TestTCPConnectionFails(t *testing.T) {
 }
 
 func TestTCPConnectionWithTLS(t *testing.T) {
-	if os.Getenv("TRAVIS") == "true" {
-		t.Skip("skipping; travisci is failing on ipv6 dns requests")
+	if os.Getenv("CI") == "true" {
+		t.Skip("skipping; CI is failing on ipv6 dns requests")
 	}
 
 	ln, err := net.Listen("tcp", ":0")
@@ -84,14 +89,16 @@ func TestTCPConnectionWithTLS(t *testing.T) {
 
 	// Create test certificates valid for 1 day.
 	certExpiry := time.Now().AddDate(0, 0, 1)
-	testcert_pem, testkey_pem := generateTestCertificate(certExpiry, false)
+	rootCertTmpl := generateCertificateTemplate(certExpiry, false)
+	rootCertTmpl.IsCA = true
+	_, rootCertPem, rootKey := generateSelfSignedCertificate(rootCertTmpl)
 
 	// CAFile must be passed via filesystem, use a tempfile.
 	tmpCaFile, err := ioutil.TempFile("", "cafile.pem")
 	if err != nil {
 		t.Fatalf(fmt.Sprintf("Error creating CA tempfile: %s", err))
 	}
-	if _, err := tmpCaFile.Write(testcert_pem); err != nil {
+	if _, err := tmpCaFile.Write(rootCertPem); err != nil {
 		t.Fatalf(fmt.Sprintf("Error writing CA tempfile: %s", err))
 	}
 	if err := tmpCaFile.Close(); err != nil {
@@ -109,7 +116,8 @@ func TestTCPConnectionWithTLS(t *testing.T) {
 		}
 		defer conn.Close()
 
-		testcert, err := tls.X509KeyPair(testcert_pem, testkey_pem)
+		rootKeyPem := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(rootKey)})
+		testcert, err := tls.X509KeyPair(rootCertPem, rootKeyPem)
 		if err != nil {
 			panic(fmt.Sprintf("Failed to decode TLS testing keypair: %s\n", err))
 		}
@@ -118,6 +126,8 @@ func TestTCPConnectionWithTLS(t *testing.T) {
 		tlsConfig := &tls.Config{
 			ServerName:   "localhost",
 			Certificates: []tls.Certificate{testcert},
+			MinVersion:   tls.VersionTLS12,
+			MaxVersion:   tls.VersionTLS12,
 		}
 		tlsConn := tls.Server(conn, tlsConfig)
 		defer tlsConn.Close()
@@ -133,8 +143,9 @@ func TestTCPConnectionWithTLS(t *testing.T) {
 	// Expect name-verified TLS connection.
 	module := config.Module{
 		TCP: config.TCPProbe{
-			IPProtocol: "ipv4",
-			TLS:        true,
+			IPProtocol:         "ip4",
+			IPProtocolFallback: true,
+			TLS:                true,
 			TLSConfig: pconfig.TLSConfig{
 				CAFile:             tmpCaFile.Name(),
 				InsecureSkipVerify: false,
@@ -168,13 +179,149 @@ func TestTCPConnectionWithTLS(t *testing.T) {
 	}
 	<-ch
 
-	// Check the probe_ssl_earliest_cert_expiry.
+	// Check the resulting metrics.
 	mfs, err := registry.Gather()
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	// Check labels
+	expectedLabels := map[string]map[string]string{
+		"probe_tls_version_info": {
+			"version": "TLS 1.2",
+		},
+	}
+	checkRegistryLabels(expectedLabels, mfs, t)
+
+	// Check values
 	expectedResults := map[string]float64{
 		"probe_ssl_earliest_cert_expiry": float64(certExpiry.Unix()),
+		"probe_ssl_last_chain_info":      1,
+		"probe_tls_version_info":         1,
+	}
+	checkRegistryResults(expectedResults, mfs, t)
+}
+
+func TestTCPConnectionWithTLSAndVerifiedCertificateChain(t *testing.T) {
+	if os.Getenv("CI") == "true" {
+		t.Skip("skipping; CI is failing on ipv6 dns requests")
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Error listening on socket: %s", err)
+	}
+	defer ln.Close()
+	_, listenPort, _ := net.SplitHostPort(ln.Addr().String())
+
+	testCTX, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// From here prepare two certificate chains where one expires before the
+	// other
+
+	rootPrivatekey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		panic(fmt.Sprintf("Error creating rsa key: %s", err))
+	}
+
+	rootCertExpiry := time.Now().AddDate(0, 0, 3)
+	rootCertTmpl := generateCertificateTemplate(rootCertExpiry, false)
+	rootCertTmpl.IsCA = true
+	_, rootCertPem := generateSelfSignedCertificateWithPrivateKey(rootCertTmpl, rootPrivatekey)
+
+	olderRootCertExpiry := time.Now().AddDate(0, 0, 1)
+	olderRootCertTmpl := generateCertificateTemplate(olderRootCertExpiry, false)
+	olderRootCertTmpl.IsCA = true
+	olderRootCert, olderRootCertPem := generateSelfSignedCertificateWithPrivateKey(olderRootCertTmpl, rootPrivatekey)
+
+	serverCertExpiry := time.Now().AddDate(0, 0, 2)
+	serverCertTmpl := generateCertificateTemplate(serverCertExpiry, false)
+	_, serverCertPem, serverKey := generateSignedCertificate(serverCertTmpl, olderRootCert, rootPrivatekey)
+
+	// CAFile must be passed via filesystem, use a tempfile.
+	tmpCaFile, err := ioutil.TempFile("", "cafile.pem")
+	if err != nil {
+		t.Fatalf(fmt.Sprintf("Error creating CA tempfile: %s", err))
+	}
+	if _, err := tmpCaFile.Write(bytes.Join([][]byte{rootCertPem, olderRootCertPem}, []byte("\n"))); err != nil {
+		t.Fatalf(fmt.Sprintf("Error writing CA tempfile: %s", err))
+	}
+	if err := tmpCaFile.Close(); err != nil {
+		t.Fatalf(fmt.Sprintf("Error closing CA tempfile: %s", err))
+	}
+	defer os.Remove(tmpCaFile.Name())
+
+	ch := make(chan (struct{}))
+	logger := log.NewNopLogger()
+	// Handle server side of this test.
+	serverFunc := func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			panic(fmt.Sprintf("Error accepting on socket: %s", err))
+		}
+		defer conn.Close()
+
+		serverKeyPem := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(serverKey)})
+
+		// Include the older root cert in the chain
+		keypair, err := tls.X509KeyPair(append(serverCertPem, olderRootCertPem...), serverKeyPem)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to decode TLS testing keypair: %s\n", err))
+		}
+
+		// Immediately upgrade to TLS.
+		tlsConfig := &tls.Config{
+			ServerName:   "localhost",
+			Certificates: []tls.Certificate{keypair},
+			MinVersion:   tls.VersionTLS12,
+			MaxVersion:   tls.VersionTLS12,
+		}
+		tlsConn := tls.Server(conn, tlsConfig)
+		defer tlsConn.Close()
+		if err := tlsConn.Handshake(); err != nil {
+			level.Error(logger).Log("msg", "Error TLS Handshake (server) failed", "err", err)
+		} else {
+			// Send some bytes before terminating the connection.
+			fmt.Fprintf(tlsConn, "Hello World!\n")
+		}
+		ch <- struct{}{}
+	}
+
+	// Expect name-verified TLS connection.
+	module := config.Module{
+		TCP: config.TCPProbe{
+			IPProtocol:         "ip4",
+			IPProtocolFallback: true,
+			TLS:                true,
+			TLSConfig: pconfig.TLSConfig{
+				CAFile:             tmpCaFile.Name(),
+				InsecureSkipVerify: false,
+			},
+		},
+	}
+
+	registry := prometheus.NewRegistry()
+	go serverFunc()
+	// Test name-verification with name from target.
+	target := net.JoinHostPort("localhost", listenPort)
+	if !ProbeTCP(testCTX, target, module, registry, log.NewNopLogger()) {
+		t.Fatalf("TCP module failed, expected success.")
+	}
+	<-ch
+
+	// Check the resulting metrics.
+	mfs, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Check values
+	expectedResults := map[string]float64{
+		"probe_ssl_earliest_cert_expiry":                float64(olderRootCertExpiry.Unix()),
+		"probe_ssl_last_chain_expiry_timestamp_seconds": float64(serverCertExpiry.Unix()),
+		"probe_ssl_last_chain_info":                     1,
+		"probe_tls_version_info":                        1,
 	}
 	checkRegistryResults(expectedResults, mfs, t)
 }
@@ -191,14 +338,16 @@ func TestTCPConnectionQueryResponseStartTLS(t *testing.T) {
 
 	// Create test certificates valid for 1 day.
 	certExpiry := time.Now().AddDate(0, 0, 1)
-	testcert_pem, testkey_pem := generateTestCertificate(certExpiry, true)
+	testCertTmpl := generateCertificateTemplate(certExpiry, true)
+	testCertTmpl.IsCA = true
+	_, testCertPem, testKey := generateSelfSignedCertificate(testCertTmpl)
 
 	// CAFile must be passed via filesystem, use a tempfile.
 	tmpCaFile, err := ioutil.TempFile("", "cafile.pem")
 	if err != nil {
 		t.Fatalf(fmt.Sprintf("Error creating CA tempfile: %s", err))
 	}
-	if _, err := tmpCaFile.Write(testcert_pem); err != nil {
+	if _, err := tmpCaFile.Write(testCertPem); err != nil {
 		t.Fatalf(fmt.Sprintf("Error writing CA tempfile: %s", err))
 	}
 	if err := tmpCaFile.Close(); err != nil {
@@ -211,14 +360,14 @@ func TestTCPConnectionQueryResponseStartTLS(t *testing.T) {
 		TCP: config.TCPProbe{
 			IPProtocolFallback: true,
 			QueryResponse: []config.QueryResponse{
-				{Expect: "^220.*ESMTP.*$"},
+				{Expect: config.MustNewRegexp("^220.*ESMTP.*$")},
 				{Send: "EHLO tls.prober"},
-				{Expect: "^250-STARTTLS"},
+				{Expect: config.MustNewRegexp("^250-STARTTLS")},
 				{Send: "STARTTLS"},
-				{Expect: "^220"},
+				{Expect: config.MustNewRegexp("^220")},
 				{StartTLS: true},
 				{Send: "EHLO tls.prober"},
-				{Expect: "^250-AUTH"},
+				{Expect: config.MustNewRegexp("^250-AUTH")},
 				{Send: "QUIT"},
 			},
 			TLSConfig: pconfig.TLSConfig{
@@ -249,7 +398,8 @@ func TestTCPConnectionQueryResponseStartTLS(t *testing.T) {
 		}
 		fmt.Fprintf(conn, "220 2.0.0 Ready to start TLS\n")
 
-		testcert, err := tls.X509KeyPair(testcert_pem, testkey_pem)
+		testKeyPem := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(testKey)})
+		testcert, err := tls.X509KeyPair(testCertPem, testKeyPem)
 		if err != nil {
 			panic(fmt.Sprintf("Failed to decode TLS testing keypair: %s\n", err))
 		}
@@ -308,7 +458,7 @@ func TestTCPConnectionQueryResponseIRC(t *testing.T) {
 			QueryResponse: []config.QueryResponse{
 				{Send: "NICK prober"},
 				{Send: "USER prober prober prober :prober"},
-				{Expect: "^:[^ ]+ 001"},
+				{Expect: config.MustNewRegexp("^:[^ ]+ 001")},
 			},
 		},
 	}
@@ -376,7 +526,7 @@ func TestTCPConnectionQueryResponseMatching(t *testing.T) {
 			IPProtocolFallback: true,
 			QueryResponse: []config.QueryResponse{
 				{
-					Expect: "SSH-2.0-(OpenSSH_6.9p1) Debian-2",
+					Expect: config.MustNewRegexp("SSH-2.0-(OpenSSH_6.9p1) Debian-2"),
 					Send:   "CONFIRM ${1}",
 				},
 			},
@@ -415,6 +565,10 @@ func TestTCPConnectionQueryResponseMatching(t *testing.T) {
 }
 
 func TestTCPConnectionProtocol(t *testing.T) {
+	if os.Getenv("CI") == "true" {
+		t.Skip("skipping; CI is failing on ipv6 dns requests")
+	}
+
 	// This test assumes that listening TCP listens both IPv6 and IPv4 traffic and
 	// localhost resolves to both 127.0.0.1 and ::1. we must skip the test if either
 	// of these isn't true. This should be true for modern Linux systems.
@@ -437,7 +591,7 @@ func TestTCPConnectionProtocol(t *testing.T) {
 
 	_, port, _ := net.SplitHostPort(ln.Addr().String())
 
-	// Force IPv4
+	// Prefer IPv4
 	module := config.Module{
 		TCP: config.TCPProbe{
 			IPProtocol: "ip4",
@@ -447,53 +601,13 @@ func TestTCPConnectionProtocol(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	result := ProbeTCP(testCTX, net.JoinHostPort("localhost", port), module, registry, log.NewNopLogger())
 	if !result {
-		t.Fatalf("TCP protocol: \"tcp4\" connection test failed, expected success.")
+		t.Fatalf("TCP protocol: \"tcp\", prefer: \"ip4\" connection test failed, expected success.")
 	}
 	mfs, err := registry.Gather()
 	if err != nil {
 		t.Fatal(err)
 	}
 	expectedResults := map[string]float64{
-		"probe_ip_protocol": 4,
-	}
-	checkRegistryResults(expectedResults, mfs, t)
-
-	// Force IPv6
-	module = config.Module{
-		TCP: config.TCPProbe{},
-	}
-
-	registry = prometheus.NewRegistry()
-	result = ProbeTCP(testCTX, net.JoinHostPort("localhost", port), module, registry, log.NewNopLogger())
-	if !result {
-		t.Fatalf("TCP protocol: \"tcp6\" connection test failed, expected success.")
-	}
-	mfs, err = registry.Gather()
-	if err != nil {
-		t.Fatal(err)
-	}
-	expectedResults = map[string]float64{
-		"probe_ip_protocol": 6,
-	}
-	checkRegistryResults(expectedResults, mfs, t)
-
-	// Prefer IPv4
-	module = config.Module{
-		TCP: config.TCPProbe{
-			IPProtocol: "ip4",
-		},
-	}
-
-	registry = prometheus.NewRegistry()
-	result = ProbeTCP(testCTX, net.JoinHostPort("localhost", port), module, registry, log.NewNopLogger())
-	if !result {
-		t.Fatalf("TCP protocol: \"tcp\", prefer: \"ip4\" connection test failed, expected success.")
-	}
-	mfs, err = registry.Gather()
-	if err != nil {
-		t.Fatal(err)
-	}
-	expectedResults = map[string]float64{
 		"probe_ip_protocol": 4,
 	}
 	checkRegistryResults(expectedResults, mfs, t)
@@ -537,25 +651,6 @@ func TestTCPConnectionProtocol(t *testing.T) {
 		"probe_ip_protocol": 6,
 	}
 	checkRegistryResults(expectedResults, mfs, t)
-
-	// No protocol
-	module = config.Module{
-		TCP: config.TCPProbe{},
-	}
-
-	registry = prometheus.NewRegistry()
-	result = ProbeTCP(testCTX, net.JoinHostPort("localhost", port), module, registry, log.NewNopLogger())
-	if !result {
-		t.Fatalf("TCP connection test with protocol unspecified failed, expected success.")
-	}
-	mfs, err = registry.Gather()
-	if err != nil {
-		t.Fatal(err)
-	}
-	expectedResults = map[string]float64{
-		"probe_ip_protocol": 6,
-	}
-	checkRegistryResults(expectedResults, mfs, t)
 }
 
 func TestPrometheusTimeoutTCP(t *testing.T) {
@@ -581,7 +676,7 @@ func TestPrometheusTimeoutTCP(t *testing.T) {
 		IPProtocolFallback: true,
 		QueryResponse: []config.QueryResponse{
 			{
-				Expect: "SSH-2.0-(OpenSSH_6.9p1) Debian-2",
+				Expect: config.MustNewRegexp("SSH-2.0-(OpenSSH_6.9p1) Debian-2"),
 			},
 		},
 	}}, registry, log.NewNopLogger()) {
