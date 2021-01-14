@@ -123,22 +123,21 @@ type roundTripTrace struct {
 
 // transport is a custom transport keeping traces for each HTTP roundtrip.
 type transport struct {
-	Transport http.RoundTripper
+	Transport             http.RoundTripper
 	NoServerNameTransport http.RoundTripper
 	firstHost             string
-	logger    log.Logger
-
-	mu      sync.Mutex
-	traces    []*roundTripTrace
-	current   *roundTripTrace
+	logger                log.Logger
+	mu                    sync.Mutex
+	traces                []*roundTripTrace
+	current               *roundTripTrace
 }
 
 func newTransport(rt, noServerName http.RoundTripper, logger log.Logger) *transport {
 	return &transport{
-		Transport: rt,
+		Transport:             rt,
 		NoServerNameTransport: noServerName,
-		logger:    logger,
-		traces:    []*roundTripTrace{},
+		logger:                logger,
+		traces:                []*roundTripTrace{},
 	}
 }
 
@@ -322,15 +321,15 @@ func ProbeHTTP(ctx context.Context, target string, module config.Module, registr
 		// the hostname of the target.
 		httpClientConfig.TLSConfig.ServerName = targetHost
 	}
-  
+
 	origHost := targetURL.Host
 	if httpClientConfig.ProxyURL.URL == nil {
-	        ip, lookupTime, err := chooseProtocol(ctx, module.HTTP.IPProtocol, module.HTTP.IPProtocolFallback, targetHost, registry, logger)
-	        if err != nil {
-		        level.Error(logger).Log("msg", "Error resolving address", "err", err)
-		        return false
-	        }
-	        durationGaugeVec.WithLabelValues("resolve").Add(lookupTime)
+		ip, lookupTime, err := chooseProtocol(ctx, module.HTTP.IPProtocol, module.HTTP.IPProtocolFallback, targetHost, registry, logger)
+		if err != nil {
+			level.Error(logger).Log("msg", "Error resolving address", "err", err)
+			return false
+		}
+		durationGaugeVec.WithLabelValues("resolve").Add(lookupTime)
 		if targetPort == "" {
 			targetURL.Host = "[" + ip.String() + "]"
 		} else {
@@ -340,12 +339,6 @@ func ProbeHTTP(ctx context.Context, target string, module config.Module, registr
 		level.Info(logger).Log("msg", "Using proxy", "proxy", httpClientConfig.ProxyURL.URL)
 	}
 
-	httpClientConfig := module.HTTP.HTTPClientConfig
-	if len(httpClientConfig.TLSConfig.ServerName) == 0 {
-		// If there is no `server_name` in tls_config, use
-		// the hostname of the target.
-		httpClientConfig.TLSConfig.ServerName = targetHost
-	}
 	client, err := pconfig.NewClientFromConfig(httpClientConfig, "http_probe", true, true)
 	if err != nil {
 		level.Error(logger).Log("msg", "Error generating HTTP client", "err", err)
